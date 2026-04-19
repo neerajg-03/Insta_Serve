@@ -996,14 +996,14 @@ const fetchProviderStatus = async () => {
             </div>
             Available Services
             <span className="ml-auto text-sm bg-blue-100 text-blue-800 px-3 py-1 rounded-full font-medium">
-              {myServices.length} services
+              {availableServices.length} services
             </span>
           </h3>
           {loading ? (
             <div className="flex justify-center py-12">
               <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
             </div>
-          ) : myServices.length === 0 ? (
+          ) : availableServices.length === 0 ? (
             <div className="text-center py-12">
               <div className="p-4 bg-gray-100 rounded-full inline-block mb-4">
                 <DocumentMagnifyingGlassIcon className="w-12 h-12 text-gray-400" />
@@ -1013,7 +1013,7 @@ const fetchProviderStatus = async () => {
             </div>
           ) : (
             <div className="space-y-4 max-h-96 overflow-y-auto pr-2">
-              {myServices
+              {availableServices
                 .filter((service: any) => service && service._id)
                 .map((service: any) => (
                   <div key={service._id} className="border border-gray-200 rounded-xl p-4 hover:shadow-lg transition-all duration-200 hover:scale-102">

@@ -240,12 +240,10 @@ router.post('/', protect, authorize('customer'), async (req, res) => {
 
         // CRITICAL: Only include providers who are:
         // 1. Active (account is active)
-        // 2. Available (isAvailable = true)
-        // 3. Have approved service in this category
-        // Note: We include providers regardless of location sharing status
-        if (!service.provider.isActive || 
-            !service.provider.isAvailable) {
-          console.log(`Provider ${service.provider.name} excluded: active=${service.provider.isActive}, available=${service.provider.isAvailable}`);
+        // 2. Have approved service in this category
+        // Note: Providers are automatically considered available when active
+        if (!service.provider.isActive) {
+          console.log(`Provider ${service.provider.name} excluded: active=${service.provider.isActive}`);
           return;
         }
         
@@ -418,9 +416,8 @@ router.post('/', protect, authorize('customer'), async (req, res) => {
           return;
         }
 
-        // Only include available providers (location sharing not required for fallback)
-        if (!service.provider.isActive || 
-            !service.provider.isAvailable) {
+        // Only include active providers (location sharing not required for fallback)
+        if (!service.provider.isActive) {
           return;
         }
         
@@ -461,11 +458,9 @@ router.post('/', protect, authorize('customer'), async (req, res) => {
 
         // CRITICAL: Only include providers who are:
         // 1. Active (account is active)
-        // 2. Available (isAvailable = true)
-        // 3. Have approved service in this category
-        // Note: We include providers regardless of location sharing status
-        if (!service.provider.isActive || 
-            !service.provider.isAvailable) {
+        // 2. Have approved service in this category
+        // Note: Providers are automatically considered available when active
+        if (!service.provider.isActive) {
           return;
         }
         

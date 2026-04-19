@@ -3,18 +3,14 @@ import { providerAPI } from '../services/api';
 import toast from 'react-hot-toast';
 import { 
   MapPinIcon,
-  PowerIcon,
   CheckCircleIcon,
-  XCircleIcon,
   ExclamationTriangleIcon
 } from '@heroicons/react/24/outline';
 import { 
-  PowerIcon as PowerSolidIcon,
   MapPinIcon as MapPinSolidIcon
 } from '@heroicons/react/24/solid';
 
 interface ProviderStatus {
-  isAvailable: boolean;
   locationSharingEnabled: boolean;
   currentLocation: {
     lat: number;
@@ -26,7 +22,6 @@ interface ProviderStatus {
 
 const ProviderAvailabilityToggle: React.FC = () => {
   const [status, setStatus] = useState<ProviderStatus>({
-    isAvailable: false,
     locationSharingEnabled: false,
     currentLocation: null,
     lastLocationUpdate: null
@@ -43,6 +38,11 @@ const ProviderAvailabilityToggle: React.FC = () => {
       setLoading(true);
       const response = await providerAPI.getStatus();
       setStatus(response);
+      
+      // Auto-enable availability and location sharing when provider visits the site
+      if (!response.locationSharingEnabled) {
+        await enableAvailability();
+      }
     } catch (error: any) {
       console.error('Failed to fetch provider status:', error);
       toast.error('Failed to fetch availability status');
@@ -51,39 +51,30 @@ const ProviderAvailabilityToggle: React.FC = () => {
     }
   };
 
-  const toggleAvailability = async () => {
+  const enableAvailability = async () => {
     try {
       setLoading(true);
-      const newAvailability = !status.isAvailable;
       
-      // Location sharing is automatically enabled when provider comes online
+      // Always set provider as available and enable location sharing
       const updateData = {
-        isAvailable: newAvailability,
-        locationSharingEnabled: newAvailability ? true : false
+        isAvailable: true,
+        locationSharingEnabled: true
       };
 
       await providerAPI.updateAvailability(updateData);
       
       setStatus(prev => ({
         ...prev,
-        isAvailable: newAvailability,
-        locationSharingEnabled: newAvailability ? true : false
+        locationSharingEnabled: true
       }));
 
-      toast.success(newAvailability ? 
-        'You are now available for bookings! Location sharing is automatically enabled.' : 
-        'You are no longer available for bookings. Location sharing disabled.'
-      );
-
-      // If turning on availability, start location tracking
-      if (newAvailability) {
-        startLocationTracking();
-      } else {
-        stopLocationTracking();
-      }
+      toast.success('You are now available for bookings! Location sharing is enabled.');
+      
+      // Start location tracking
+      startLocationTracking();
     } catch (error: any) {
-      console.error('Failed to update availability:', error);
-      toast.error(error.response?.data?.message || 'Failed to update availability');
+      console.error('Failed to enable availability:', error);
+      toast.error(error.response?.data?.message || 'Failed to enable availability');
     } finally {
       setLoading(false);
     }
@@ -172,8 +163,8 @@ const ProviderAvailabilityToggle: React.FC = () => {
   };
 
   useEffect(() => {
-    // Start location tracking if availability is enabled
-    if (status.isAvailable && status.locationSharingEnabled) {
+    // Start location tracking if location sharing is enabled
+    if (status.locationSharingEnabled) {
       startLocationTracking();
     }
 
@@ -181,65 +172,29 @@ const ProviderAvailabilityToggle: React.FC = () => {
     return () => {
       stopLocationTracking();
     };
-  }, [status.isAvailable, status.locationSharingEnabled]);
-
-  const getStatusColor = () => {
-    if (status.isAvailable) {
-      return 'bg-green-500';
-    } else {
-      return 'bg-gray-400';
-    }
-  };
-
-  const getStatusText = () => {
-    if (status.isAvailable) {
-      return 'Available & Location Sharing Active';
-    } else {
-      return 'Unavailable';
-    }
-  };
+  }, [status.locationSharingEnabled]);
 
   return (
     <div className="bg-white rounded-lg shadow-md p-6 border border-gray-200">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-lg font-semibold text-gray-900">Availability Status</h3>
-        <div className={`w-3 h-3 rounded-full ${getStatusColor()}`}></div>
+        <div className="w-3 h-3 rounded-full bg-green-500"></div>
       </div>
 
       <div className="space-y-4">
-        {/* Main Availability Toggle */}
-        <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
+        {/* Availability Status */}
+        <div className="flex items-center justify-between p-4 bg-green-50 rounded-lg">
           <div className="flex items-center space-x-3">
-            <div className="p-2 bg-blue-100 rounded-lg">
-              {status.isAvailable ? (
-                <PowerSolidIcon className="w-6 h-6 text-blue-600" />
-              ) : (
-                <PowerIcon className="w-6 h-6 text-gray-600" />
-              )}
+            <div className="p-2 bg-green-100 rounded-lg">
+              <CheckCircleIcon className="w-6 h-6 text-green-600" />
             </div>
             <div>
               <p className="font-medium text-gray-900">Available for Bookings</p>
               <p className="text-sm text-gray-500">
-                {status.isAvailable ? 
-                  'You will receive booking requests' : 
-                  'You will not receive booking requests'
-                }
+                You will receive booking requests automatically
               </p>
             </div>
           </div>
-          <button
-            onClick={toggleAvailability}
-            disabled={loading}
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-              status.isAvailable ? 'bg-blue-600' : 'bg-gray-300'
-            } ${loading ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
-          >
-            <span
-              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                status.isAvailable ? 'translate-x-6' : 'translate-x-1'
-              }`}
-            />
-          </button>
         </div>
 
         
@@ -247,7 +202,7 @@ const ProviderAvailabilityToggle: React.FC = () => {
         <div className="mt-4 p-3 bg-blue-50 rounded-lg">
           <div className="flex items-center space-x-2">
             <div className="w-2 h-2 rounded-full bg-blue-500"></div>
-            <p className="text-sm font-medium text-blue-900">Current Status: {getStatusText()}</p>
+            <p className="text-sm font-medium text-blue-900">Status: Available & Location Sharing Active</p>
           </div>
           
           {status.lastLocationUpdate && (
@@ -269,10 +224,11 @@ const ProviderAvailabilityToggle: React.FC = () => {
         <div className="text-xs text-gray-500 space-y-1">
           <p>** Important Notes:</p>
           <ul className="list-disc list-inside space-y-1">
-            <li>Location sharing is automatically enabled when you become available</li>
+            <li>You are automatically available for bookings when visiting the site</li>
+            <li>Location sharing is automatically enabled for booking requests</li>
             <li>Your location is only shared with customers who have booked your services</li>
-            <li>Location updates automatically every 30 seconds when available</li>
-            <li>Turning off availability will stop all location tracking</li>
+            <li>Location updates automatically every 30 seconds</li>
+            <li>Leave the dashboard to stop receiving new booking requests</li>
           </ul>
         </div>
       </div>

@@ -804,6 +804,11 @@ const fetchProviderStatus = async () => {
       const response = await providerAPI.getStatus();
       setLocationSharingEnabled(response.locationSharingEnabled || false);
       
+      // Auto-enable availability if not already enabled
+      if (!response.isAvailable || !response.locationSharingEnabled) {
+        await autoEnableProvider();
+      }
+      
       if (response.currentLocation) {
         setCurrentLocation({
           lat: response.currentLocation.lat,
@@ -829,6 +834,20 @@ const fetchProviderStatus = async () => {
         setLastLocationUpdate(new Date(storedLocation.timestamp));
         console.log('Using stored location due to API error');
       }
+    }
+  };
+
+  const autoEnableProvider = async () => {
+    try {
+      console.log('Auto-enabling provider availability...');
+      await providerAPI.updateAvailability({
+        isAvailable: true,
+        locationSharingEnabled: true
+      });
+      console.log('Provider auto-enabled successfully');
+      setLocationSharingEnabled(true);
+    } catch (error) {
+      console.error('Failed to auto-enable provider:', error);
     }
   };
 

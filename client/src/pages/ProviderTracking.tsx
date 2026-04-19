@@ -1,0 +1,1045 @@
+// Modern Provider Tracking Component with Real-time Live Tracking
+import React, { useState, useEffect, useRef } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { useSelector, useDispatch } from 'react-redux';
+import { RootState } from '../store';
+import { bookingsAPI } from '../services/api';
+import socketService, { LocationData } from '../services/socketService';
+import toast from 'react-hot-toast';
+import LiveTrackingMap from '../components/LiveTrackingMap';
+import { calculateTrackingInfo, formatDistance, formatDuration, getCurrentLocation, watchLocation, stopWatchingLocation } from '../utils/geoUtils';
+import {
+  MapPinIcon,
+  PhoneIcon,
+  UserIcon,
+  ArrowRightIcon,
+  CheckCircleIcon,
+  ClockIcon,
+  ExclamationTriangleIcon,
+  CalendarIcon,
+  PlayIcon,
+  WrenchScrewdriverIcon,
+  HomeIcon,
+  TruckIcon,
+  ArrowTrendingUpIcon,
+  BanknotesIcon,
+  CurrencyDollarIcon,
+  ShieldCheckIcon,
+  ChatBubbleLeftIcon
+} from '@heroicons/react/24/outline';
+import { CheckCircleIcon as CheckSolidIcon, PlayIcon as PlaySolidIcon } from '@heroicons/react/24/solid';
+import ChatComponent from '../components/ChatComponent';
+
+interface Booking {
+  _id: string;
+  service: {
+    _id: string;
+    title: string;
+    description: string;
+    category: string;
+    price: number;
+    duration: {
+      value: number;
+      unit: string;
+    };
+    images?: string[];
+  };
+  customer: {
+    _id: string;
+    name: string;
+    email: string;
+    phone: string;
+    address: string | {
+      street: string;
+      city: string;
+      state: string;
+      pincode: string;
+    };
+  };
+  provider?: {
+    _id: string;
+    name: string;
+    email: string;
+    phone: string;
+    rating?: number;
+    totalServices?: number;
+    verified?: boolean;
+    location?: {
+      latitude: number;
+      longitude: number;
+    };
+  } | null;
+  status: 'pending' | 'confirmed' | 'in_progress' | 'completed' | 'cancelled' | 'broadcast';
+  scheduledDate: string;
+  scheduledTime: string;
+  address: string | {
+    street: string;
+    city: string;
+    state: string;
+    pincode: string;
+  };
+  notes: string;
+  totalAmount?: number;
+  price?: {
+    totalPrice: number;
+  };
+  createdAt: string;
+  updatedAt: string;
+  customerNotes?: string;
+}
+
+interface TimelineEvent {
+  id: string;
+  type: 'booking_received' | 'service_accepted' | 'service_started' | 'customer_arrived' | 'service_completed';
+  title: string;
+  description: string;
+  timestamp: Date;
+  completed: boolean;
+}
+
+const ProviderTrackingNew: React.FC = () => {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const { user } = useSelector((state: RootState) => state.auth);
+  const dispatch = useDispatch();
+  
+  const [booking, setBooking] = useState<Booking | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  
+  // Real-time tracking states
+  const [customerLocation, setCustomerLocation] = useState<LocationData | null>(null);
+  const [providerLocation, setProviderLocation] = useState<LocationData | null>(null);
+  const [trackingInfo, setTrackingInfo] = useState({ distance: 0, duration: 0, unit: 'km' });
+  const [isTracking, setIsTracking] = useState(false);
+  const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
+  const [locationWatchId, setLocationWatchId] = useState<number | null>(null);
+  const [socketConnected, setSocketConnected] = useState(false);
+  const [showChat, setShowChat] = useState(false);
+  const [showCompleteServiceModal, setShowCompleteServiceModal] = useState(false);
+  const [serviceImages, setServiceImages] = useState<File[]>([]);
+  const [imagePreviews, setImagePreviews] = useState<string[]>([]);
+  const [uploadingImages, setUploadingImages] = useState(false);
+
+  useEffect(() => {
+    if (id) {
+      fetchBookingDetails();
+    }
+  }, [id]);
+
+  useEffect(() => {
+    // Initialize socket connection and location tracking
+    initializeTracking();
+    
+    return () => {
+      cleanup();
+    };
+  }, [booking, user]);
+
+  const initializeTracking = async () => {
+    if (!booking || !user) return;
+
+    try {
+      // Connect to socket
+      await socketService.connect({
+        userId: user._id,
+        name: user.name,
+        email: user.email,
+        role: 'provider'
+      });
+      
+      setSocketConnected(socketService.isConnected());
+
+      // Join booking room for real-time updates
+      socketService.joinBookingRoom(booking._id);
+
+      // Set up location update listener
+      socketService.onLocationUpdate((data) => {
+        if (data.bookingId === booking._id) {
+          console.log('📍 Customer location update received:', data.location);
+          setCustomerLocation(data.location);
+          setIsTracking(true);
+          
+          // Update tracking info
+          if (providerLocation) {
+            const info = calculateTrackingInfo(providerLocation, data.location);
+            setTrackingInfo(info);
+          }
+        }
+      });
+
+      // Set up booking update listener
+      socketService.onBookingUpdate((data) => {
+        if (data.bookingId === booking._id) {
+          console.log('📢 Booking status update:', data);
+          setBooking(prev => prev ? { ...prev, status: data.status } : null);
+          addTimelineEvent(data.status);
+        }
+      });
+
+      // Get provider location
+      try {
+        const location = await getCurrentLocation();
+        setProviderLocation(location);
+        
+        // Start watching location for updates
+        const watchId = watchLocation(
+          (newLocation) => {
+            setProviderLocation(newLocation);
+            socketService.sendLocationUpdate(newLocation, booking._id);
+          },
+          (error) => {
+            console.error('Location watch error:', error);
+            toast.error('Location tracking disabled');
+          }
+        );
+        setLocationWatchId(watchId);
+      } catch (error) {
+        console.error('Could not get provider location:', error);
+        toast.error('Could not access your location');
+      }
+
+    } catch (error) {
+      console.error('Failed to initialize tracking:', error);
+      toast.error('Failed to start live tracking');
+    }
+  };
+
+  const cleanup = () => {
+    if (locationWatchId !== null) {
+      stopWatchingLocation(locationWatchId);
+      setLocationWatchId(null);
+    }
+    
+    socketService.leaveBookingRoom(booking?._id || '');
+    socketService.off('location_update');
+    socketService.off('booking_update');
+  };
+
+  const fetchBookingDetails = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      
+      console.log('Fetching booking details for provider, ID:', id);
+      const response = await bookingsAPI.getBooking(id!);
+      
+      let bookingData = null;
+      if (response?.booking) {
+        bookingData = response.booking;
+      } else if (response) {
+        bookingData = response;
+      }
+      
+      if (bookingData) {
+        setBooking(bookingData);
+        initializeTimeline(bookingData);
+        console.log('Successfully loaded real booking data for provider');
+      } else {
+        throw new Error('Booking not found or invalid response format');
+      }
+    } catch (error: any) {
+      console.error('Error fetching booking details for provider:', error);
+      
+      if (error.response?.status === 404) {
+        setError('Booking not found. The booking ID may not exist in the database.');
+      } else if (error.response?.status === 403 || error.response?.status === 401) {
+        setError('Authentication required. Please log in again.');
+        setTimeout(() => {
+          window.location.href = '/login';
+        }, 2000);
+      } else {
+        setError(error.response?.data?.message || error.message || 'Failed to fetch booking details');
+      }
+      
+      toast.error('Failed to load booking details');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const initializeTimeline = (bookingData: Booking) => {
+    const events: TimelineEvent[] = [
+      {
+        id: '1',
+        type: 'booking_received',
+        title: 'Booking Received',
+        description: 'New service request received',
+        timestamp: new Date(bookingData.createdAt),
+        completed: true
+      }
+    ];
+
+    if (bookingData.status !== 'broadcast') {
+      events.push({
+        id: '2',
+        type: 'service_accepted',
+        title: 'Service Accepted',
+        description: 'You accepted this service request',
+        timestamp: new Date(bookingData.updatedAt),
+        completed: true
+      });
+    }
+
+    if (bookingData.status === 'in_progress') {
+      events.push({
+        id: '3',
+        type: 'service_started',
+        title: 'Service Started',
+        description: 'Service is currently in progress',
+        timestamp: new Date(),
+        completed: true
+      });
+    }
+
+    setTimelineEvents(events);
+  };
+
+  const addTimelineEvent = (status: string) => {
+    const newEvent: TimelineEvent = {
+      id: Date.now().toString(),
+      type: status as any,
+      title: getStatusText(status),
+      description: getStatusDescription(status),
+      timestamp: new Date(),
+      completed: true
+    };
+
+    setTimelineEvents(prev => [...prev, newEvent]);
+  };
+
+  const getStatusText = (status: string) => {
+    switch (status) {
+      case 'pending': return 'Pending';
+      case 'confirmed': return 'Confirmed';
+      case 'in_progress': return 'In Progress';
+      case 'completed': return 'Completed';
+      case 'cancelled': return 'Cancelled';
+      case 'broadcast': return 'New Request';
+      default: return 'Unknown';
+    }
+  };
+
+  const getStatusDescription = (status: string) => {
+    switch (status) {
+      case 'pending': return 'Booking is pending confirmation';
+      case 'confirmed': return 'Service has been confirmed';
+      case 'in_progress': return 'Service is currently in progress';
+      case 'completed': return 'Service has been completed successfully';
+      case 'cancelled': return 'Service has been cancelled';
+      case 'broadcast': return 'New service request received';
+      default: return 'Status updated';
+    }
+  };
+
+  const handleAcceptBooking = async () => {
+    try {
+      await bookingsAPI.updateBooking(id!, { status: 'confirmed' });
+      setBooking(prev => prev ? { ...prev, status: 'confirmed' } : null);
+      addTimelineEvent('confirmed');
+      toast.success('Booking accepted successfully!');
+    } catch (error: any) {
+      toast.error(error.response?.data?.message || 'Failed to accept booking');
+    }
+  };
+
+  const handleStartService = async () => {
+    try {
+      await bookingsAPI.updateBooking(id!, { status: 'in_progress' });
+      setBooking(prev => prev ? { ...prev, status: 'in_progress' } : null);
+      addTimelineEvent('in_progress');
+      toast.success('Service started!');
+    } catch (error: any) {
+      toast.error(error.response?.data?.message || 'Failed to start service');
+    }
+  };
+
+  const handleCompleteService = () => {
+    setShowCompleteServiceModal(true);
+  };
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    setServiceImages(prev => [...prev, ...files]);
+    
+    // Create previews
+    files.forEach(file => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        setImagePreviews(prev => [...prev, e.target?.result as string]);
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const removeImage = (index: number) => {
+    setServiceImages(prev => prev.filter((_, i) => i !== index));
+    setImagePreviews(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const handleConfirmCompleteService = async () => {
+    try {
+      setUploadingImages(true);
+      
+      // Upload images first if any
+      let uploadedImageUrls: string[] = [];
+      if (serviceImages.length > 0) {
+        const formData = new FormData();
+        serviceImages.forEach((file, index) => {
+          formData.append(`images`, file);
+        });
+        formData.append('bookingId', id!);
+        
+        const uploadResponse = await fetch('/api/bookings/upload-service-images', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('token')}`
+          },
+          body: formData
+        });
+        
+        if (uploadResponse.ok) {
+          const uploadData = await uploadResponse.json();
+          uploadedImageUrls = uploadData.imageUrls || [];
+        } else {
+          throw new Error('Failed to upload images');
+        }
+      }
+      
+      // Complete the service with image URLs
+      await bookingsAPI.completeBooking(id!, { images: uploadedImageUrls });
+      setBooking(prev => prev ? { ...prev, status: 'completed' } : null);
+      addTimelineEvent('completed');
+      
+      // Reset modal state
+      setShowCompleteServiceModal(false);
+      setServiceImages([]);
+      setImagePreviews([]);
+      
+      toast.success('Service completed successfully!');
+    } catch (error: any) {
+      console.error('Error completing service:', error);
+      toast.error(error.response?.data?.message || 'Failed to complete service');
+    } finally {
+      setUploadingImages(false);
+    }
+  };
+
+  const handleContactCustomer = () => {
+    if (booking?.customer?.phone) {
+      window.location.href = `tel:${booking.customer.phone}`;
+    }
+  };
+
+  const handleNavigateToLocation = () => {
+    if (booking?.address) {
+      const addressString = typeof booking.address === 'string' 
+        ? booking.address 
+        : `${booking.address?.street || ''}, ${booking.address?.city || ''}, ${booking.address?.state || ''} - ${booking.address?.pincode || ''}`;
+      
+      const url = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(addressString)}&travelmode=driving`;
+      window.open(url, '_blank');
+    }
+  };
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'pending': return 'bg-yellow-100 text-yellow-800 border-yellow-200';
+      case 'confirmed': return 'bg-blue-100 text-blue-800 border-blue-200';
+      case 'in_progress': return 'bg-purple-100 text-purple-800 border-purple-200';
+      case 'completed': return 'bg-green-100 text-green-800 border-green-200';
+      case 'cancelled': return 'bg-red-100 text-red-800 border-red-200';
+      case 'broadcast': return 'bg-orange-100 text-orange-800 border-orange-200';
+      default: return 'bg-gray-100 text-gray-800 border-gray-200';
+    }
+  };
+
+  const getStatusIcon = (status: string) => {
+    switch (status) {
+      case 'pending': return <ClockIcon className="w-5 h-5" />;
+      case 'confirmed': return <CheckCircleIcon className="w-5 h-5" />;
+      case 'in_progress': return <PlayIcon className="w-5 h-5" />;
+      case 'completed': return <CheckSolidIcon className="w-5 h-5" />;
+      case 'cancelled': return <ExclamationTriangleIcon className="w-5 h-5" />;
+      case 'broadcast': return <ClockIcon className="w-5 h-5" />;
+      default: return <ClockIcon className="w-5 h-5" />;
+    }
+  };
+
+  const formatAddress = (address: string | any) => {
+    if (typeof address === 'string') return address;
+    if (typeof address === 'object' && address !== null) {
+      return `${address.street || ''}, ${address.city || ''}, ${address.state || ''} - ${address.pincode || ''}`;
+    }
+    return 'Address not available';
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading service details...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error || !booking) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center max-w-md mx-auto p-6">
+          <ExclamationTriangleIcon className="w-16 h-16 text-red-400 mx-auto mb-4" />
+          <h2 className="text-xl font-semibold text-gray-900 mb-2">Error</h2>
+          <p className="text-gray-600 mb-6">{error || 'Booking not found'}</p>
+          <div className="space-y-3">
+            <button
+              onClick={() => navigate('/provider-dashboard')}
+              className="w-full px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+            >
+              Back to Dashboard
+            </button>
+            <button
+              onClick={fetchBookingDetails}
+              className="w-full px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
+            >
+              Try Again
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      {/* Header */}
+      <div className="bg-gradient-to-r from-green-600 to-emerald-700 text-white">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="flex items-center mb-2">
+                <button
+                  onClick={() => navigate('/provider-dashboard')}
+                  className="mr-4 p-2 hover:bg-white/20 rounded-lg transition-colors"
+                >
+                  <ArrowRightIcon className="w-5 h-5 rotate-180" />
+                </button>
+                <h1 className="text-3xl font-bold">Live Service Dashboard</h1>
+              </div>
+              <p className="text-green-100">Booking ID: #{booking._id.slice(-8)}</p>
+            </div>
+            <div className="text-right">
+              <p className="text-sm text-green-100 mb-1">Connection Status</p>
+              <span className={`inline-flex items-center px-3 py-1 text-sm font-semibold rounded-full ${
+                socketConnected ? 'bg-green-500 text-white' : 'bg-red-500 text-white'
+              }`}>
+                <div className={`w-2 h-2 rounded-full mr-2 ${socketConnected ? 'bg-white' : 'bg-white animate-pulse'}`}></div>
+                {socketConnected ? 'CONNECTED' : 'DISCONNECTED'}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+          {/* Main Content */}
+          <div className="lg:col-span-2 space-y-6">
+            {/* Customer Location Tracking */}
+            {(booking.status === 'confirmed' || booking.status === 'in_progress') && (
+              <div className="bg-white rounded-2xl shadow-xl overflow-hidden">
+                <div className="bg-gradient-to-r from-blue-500 to-green-600 text-white p-6">
+                  <h2 className="text-2xl font-bold mb-4 flex items-center">
+                    <MapPinIcon className="w-6 h-6 mr-2" />
+                    Customer Location
+                  </h2>
+                  
+                  {isTracking && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="bg-white/20 rounded-xl p-4">
+                        <p className="text-blue-100 text-sm mb-1">Distance to Customer</p>
+                        <p className="font-semibold text-lg">{formatDistance(trackingInfo.distance)}</p>
+                        <p className="text-blue-100 text-sm">From your location</p>
+                      </div>
+                      <div className="bg-white/20 rounded-xl p-4">
+                        <p className="text-blue-100 text-sm mb-1">ETA</p>
+                        <p className="font-semibold text-lg">{formatDuration(trackingInfo.duration)}</p>
+                        <p className="text-blue-100 text-sm">Estimated arrival</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                
+                {/* Live Map */}
+                <div className="p-6">
+                  <LiveTrackingMap
+                    providerLocation={providerLocation}
+                    customerLocation={customerLocation}
+                    isProvider={true}
+                    bookingId={booking._id}
+                  />
+                  
+                  <div className="mt-4 grid grid-cols-2 gap-4">
+                    <button
+                      onClick={handleNavigateToLocation}
+                      className="px-4 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors font-medium flex items-center justify-center"
+                    >
+                      <MapPinIcon className="w-4 h-4 mr-2" />
+                      Navigate Now
+                    </button>
+                    <button
+                      onClick={handleContactCustomer}
+                      className="px-4 py-3 bg-green-600 text-white rounded-xl hover:bg-green-700 transition-colors font-medium flex items-center justify-center"
+                    >
+                      <PhoneIcon className="w-4 h-4 mr-2" />
+                      Call Customer
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Service Status Card */}
+            <div className="bg-white rounded-2xl shadow-xl overflow-hidden">
+              <div className="bg-gradient-to-r from-green-500 to-teal-600 text-white p-6">
+                <h2 className="text-2xl font-bold mb-4">Service Status</h2>
+                
+                {booking.status === 'broadcast' && (
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center">
+                      <div className="animate-pulse">
+                        <ClockIcon className="w-8 h-8 mr-4" />
+                      </div>
+                      <div>
+                        <p className="font-semibold text-lg">New Service Request!</p>
+                        <p className="text-green-100">Customer needs {booking.service.title}</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleAcceptBooking}
+                      className="bg-white text-green-600 px-6 py-3 rounded-xl font-semibold hover:bg-green-50 transition-colors"
+                    >
+                      Accept Booking
+                    </button>
+                  </div>
+                )}
+                
+                {booking.status === 'confirmed' && (
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center">
+                      <CheckCircleIcon className="w-8 h-8 mr-4" />
+                      <div>
+                        <p className="font-semibold text-lg">Booking Confirmed</p>
+                        <p className="text-green-100">Ready to start service</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleStartService}
+                      className="bg-white text-green-600 px-6 py-3 rounded-xl font-semibold hover:bg-green-50 transition-colors flex items-center"
+                    >
+                      <PlaySolidIcon className="w-4 h-4 mr-2" />
+                      Start Service
+                    </button>
+                  </div>
+                )}
+                
+                {booking.status === 'in_progress' && (
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center">
+                      <div className="animate-pulse">
+                        <WrenchScrewdriverIcon className="w-8 h-8 mr-4" />
+                      </div>
+                      <div>
+                        <p className="font-semibold text-lg">Service In Progress</p>
+                        <p className="text-green-100">Working on customer service</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleCompleteService}
+                      className="bg-white text-green-600 px-6 py-3 rounded-xl font-semibold hover:bg-green-50 transition-colors"
+                    >
+                      Complete Service
+                    </button>
+                  </div>
+                )}
+                
+                {booking.status === 'completed' && (
+                  <div className="flex items-center">
+                    <CheckSolidIcon className="w-8 h-8 mr-4" />
+                    <div>
+                      <p className="font-semibold text-lg">Service Completed!</p>
+                      <p className="text-green-100">Payment will be processed shortly</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Service Information */}
+              <div className="p-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div>
+                    <p className="text-sm text-gray-600 mb-1">Service Type</p>
+                    <p className="font-semibold text-gray-900">{booking.service.title}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-600 mb-1">Scheduled Date</p>
+                    <p className="font-semibold text-gray-900">
+                      {new Date(booking.scheduledDate).toLocaleDateString()}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-600 mb-1">Customer Address</p>
+                    <p className="font-semibold text-gray-900 text-sm">
+                      {formatAddress(booking.address)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-600 mb-1">Your Earnings</p>
+                    <p className="font-semibold text-green-600 text-lg">¥{booking.totalAmount || booking.price?.totalPrice || 0}</p>
+                  </div>
+                </div>
+
+                {/* Customer Notes */}
+                {booking.customerNotes && (
+                  <div className="mt-6 p-4 bg-blue-50 border border-blue-200 rounded-xl">
+                    <p className="text-sm font-semibold text-blue-900 mb-1">Customer Notes:</p>
+                    <p className="text-sm text-blue-700">{booking.customerNotes}</p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Navigation & Actions */}
+            {(booking.status === 'confirmed' || booking.status === 'in_progress') && (
+              <div className="bg-white rounded-2xl shadow-xl p-6">
+                <h2 className="text-2xl font-bold text-gray-900 mb-6 flex items-center">
+                  <MapPinIcon className="w-6 h-6 mr-2 text-green-500" />
+                  Quick Actions
+                </h2>
+                
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <button
+                    onClick={handleNavigateToLocation}
+                    className="px-4 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors font-medium flex items-center justify-center"
+                  >
+                    <MapPinIcon className="w-4 h-4 mr-2" />
+                    Navigate
+                  </button>
+                  <button
+                    onClick={handleContactCustomer}
+                    className="px-4 py-3 bg-green-600 text-white rounded-xl hover:bg-green-700 transition-colors font-medium flex items-center justify-center"
+                  >
+                    <PhoneIcon className="w-4 h-4 mr-2" />
+                    Call
+                  </button>
+                  <button
+                    className="px-4 py-3 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-colors font-medium flex items-center justify-center"
+                  >
+                    <ChatBubbleLeftIcon className="w-4 h-4 mr-2" />
+                    Chat
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Sidebar */}
+          <div className="space-y-6">
+            {/* Customer Information */}
+            <div className="bg-white rounded-2xl shadow-xl p-6">
+              <h3 className="text-xl font-bold text-gray-900 mb-6 flex items-center">
+                <UserIcon className="w-5 h-5 mr-2 text-green-500" />
+                Customer Information
+              </h3>
+              <div className="space-y-4">
+                <div className="flex items-center">
+                  <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center mr-4">
+                    <UserIcon className="w-6 h-6 text-blue-600" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-gray-900">{booking.customer.name}</p>
+                    <p className="text-sm text-gray-500">Customer</p>
+                  </div>
+                </div>
+                
+                <div className="space-y-3 pt-4 border-t">
+                  <div className="flex items-center text-sm">
+                    <PhoneIcon className="w-4 h-4 mr-2 text-gray-400" />
+                    <span className="text-gray-600">{booking.customer.phone}</span>
+                  </div>
+                  <div className="flex items-center text-sm">
+                    <span className="w-4 h-4 mr-2 text-gray-400">@</span>
+                    <span className="text-gray-600 text-xs">{booking.customer.email}</span>
+                  </div>
+                  <div className="flex items-start text-sm">
+                    <HomeIcon className="w-4 h-4 mr-2 text-gray-400 mt-0.5" />
+                    <span className="text-gray-600">{formatAddress(booking.address)}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-6 space-y-3">
+                <button
+                  onClick={handleContactCustomer}
+                  className="w-full px-4 py-3 bg-green-600 text-white rounded-xl hover:bg-green-700 transition-colors font-medium flex items-center justify-center"
+                >
+                  <PhoneIcon className="w-4 h-4 mr-2" />
+                  Call Customer
+                </button>
+                <button
+                  onClick={() => setShowChat(true)}
+                  className="w-full px-4 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors font-medium flex items-center justify-center"
+                >
+                  <ChatBubbleLeftIcon className="w-4 h-4 mr-2" />
+                  Message Customer
+                </button>
+              </div>
+            </div>
+
+            {/* Service Details */}
+            <div className="bg-white rounded-2xl shadow-xl p-6">
+              <h3 className="text-xl font-bold text-gray-900 mb-6 flex items-center">
+                <CalendarIcon className="w-5 h-5 mr-2 text-green-500" />
+                Service Details
+              </h3>
+              <div className="space-y-4">
+                <div>
+                  <p className="text-sm text-gray-600">Service</p>
+                  <p className="font-medium text-gray-900">{booking.service?.title || 'Service'}</p>
+                </div>
+                <div>
+                  <p className="text-sm text-gray-600">Category</p>
+                  <p className="font-medium text-gray-900">
+                    {booking.service?.category?.replace(/_/g, ' ')?.replace(/\b\w/g, (l: string) => l.toUpperCase()) || 'N/A'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-sm text-gray-600">Duration</p>
+                  <p className="font-medium text-gray-900">
+                    {booking.service?.duration?.value || 'N/A'} {booking.service?.duration?.unit || ''}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-sm text-gray-600">Your Earnings</p>
+                  <p className="font-medium text-green-600 text-lg">¥{booking.totalAmount || booking.price?.totalPrice || 0}</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Earnings Summary */}
+            <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-2xl p-6">
+              <h3 className="text-xl font-bold text-green-900 mb-6 flex items-center">
+                <BanknotesIcon className="w-5 h-5 mr-2" />
+                Earnings Summary
+              </h3>
+              <div className="space-y-3">
+                <div className="flex justify-between">
+                  <span className="text-gray-600">Service Amount:</span>
+                  <span className="font-medium">¥{booking.totalAmount || booking.price?.totalPrice || 0}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-600">Platform Fee (10%):</span>
+                  <span className="font-medium">-¥{Math.floor((booking.totalAmount || booking.price?.totalPrice || 0) * 0.1)}</span>
+                </div>
+                <div className="border-t pt-3 flex justify-between">
+                  <span className="font-semibold text-green-900">Your Earnings:</span>
+                  <span className="font-bold text-green-900 text-lg">
+                    ¥{Math.floor((booking.totalAmount || booking.price?.totalPrice || 0) * 0.9)}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Service Timeline */}
+            <div className="bg-white rounded-2xl shadow-xl p-6">
+              <h3 className="text-xl font-bold text-gray-900 mb-6 flex items-center">
+                <ClockIcon className="w-5 h-5 mr-2 text-green-500" />
+                Service Timeline
+              </h3>
+              <div className="space-y-4">
+                {timelineEvents.map((event, index) => (
+                  <div key={event.id} className="flex items-start">
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center mr-3 mt-0.5 ${
+                      event.completed ? 'bg-green-100' : 'bg-gray-100'
+                    }`}>
+                      {event.completed ? (
+                        <CheckSolidIcon className="w-4 h-4 text-green-600" />
+                      ) : (
+                        <div className="w-4 h-4 bg-gray-400 rounded-full animate-pulse"></div>
+                      )}
+                    </div>
+                    <div className="flex-1">
+                      <p className="font-medium text-gray-900">{event.title}</p>
+                      <p className="text-sm text-gray-600">{event.description}</p>
+                      <p className="text-xs text-gray-500">{event.timestamp.toLocaleString()}</p>
+                    </div>
+                  </div>
+                ))}
+                
+                {booking.status === 'in_progress' && (
+                  <div className="flex items-start">
+                    <div className="w-8 h-8 bg-purple-100 rounded-full flex items-center justify-center mr-3 mt-0.5">
+                      <div className="w-4 h-4 bg-purple-600 rounded-full animate-pulse"></div>
+                    </div>
+                    <div className="flex-1">
+                      <p className="font-medium text-gray-900">Service In Progress</p>
+                      <p className="text-sm text-gray-600">Working on customer service</p>
+                      <p className="text-xs text-gray-500">Tracking live...</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    {/* Complete Service Modal */}
+    {showCompleteServiceModal && (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="bg-white rounded-2xl p-8 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+          <h3 className="text-2xl font-bold text-gray-900 mb-6">Complete Service</h3>
+          
+          <div className="space-y-6">
+            {/* Instructions */}
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+              <p className="text-blue-900 font-medium mb-2">Upload Work Photos</p>
+              <p className="text-blue-700 text-sm">
+                Please upload photos of the completed work to show the customer what was done.
+                This helps build trust and provides proof of service completion.
+              </p>
+            </div>
+
+            {/* Image Upload Area */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Service Photos (Optional)
+              </label>
+              <div className="border-2 border-dashed border-gray-300 rounded-xl p-6 text-center hover:border-gray-400 transition-colors">
+                <input
+                  type="file"
+                  multiple
+                  accept="image/*"
+                  onChange={handleImageUpload}
+                  className="hidden"
+                  id="service-images"
+                />
+                <label
+                  htmlFor="service-images"
+                  className="cursor-pointer"
+                >
+                  <div className="flex flex-col items-center">
+                    <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center mb-3">
+                      <svg className="w-6 h-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                      </svg>
+                    </div>
+                    <p className="text-gray-600 font-medium">Click to upload photos</p>
+                    <p className="text-gray-500 text-sm">PNG, JPG, GIF up to 10MB each</p>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            {/* Image Previews */}
+            {imagePreviews.length > 0 && (
+              <div>
+                <p className="text-sm font-medium text-gray-700 mb-3">
+                  Uploaded Photos ({imagePreviews.length})
+                </p>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                  {imagePreviews.map((preview, index) => (
+                    <div key={index} className="relative group">
+                      <img
+                        src={preview}
+                        alt={`Service photo ${index + 1}`}
+                        className="w-full h-32 object-cover rounded-lg border border-gray-200"
+                      />
+                      <button
+                        onClick={() => removeImage(index)}
+                        className="absolute top-2 right-2 bg-red-500 text-white p-1 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Service Summary */}
+            <div className="bg-gray-50 rounded-xl p-4">
+              <h4 className="font-semibold text-gray-900 mb-3">Service Summary</h4>
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-gray-600">Service:</span>
+                  <span className="font-medium">{booking?.service?.title}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-600">Customer:</span>
+                  <span className="font-medium">{booking?.customer?.name}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-600">Your Earnings:</span>
+                  <span className="font-medium text-green-600">
+                    ¥{Math.floor((booking?.totalAmount || booking?.price?.totalPrice || 0) * 0.9)}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Action Buttons */}
+          <div className="flex space-x-4 mt-8">
+            <button
+              onClick={() => {
+                setShowCompleteServiceModal(false);
+                setServiceImages([]);
+                setImagePreviews([]);
+              }}
+              className="flex-1 px-4 py-3 bg-gray-200 text-gray-800 rounded-xl hover:bg-gray-300 transition-colors font-medium"
+              disabled={uploadingImages}
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleConfirmCompleteService}
+              disabled={uploadingImages}
+              className="flex-1 px-4 py-3 bg-green-600 text-white rounded-xl hover:bg-green-700 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {uploadingImages ? (
+                <span className="flex items-center justify-center">
+                  <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  Completing...
+                </span>
+              ) : (
+                'Complete Service'
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* Chat Component */}
+    {booking && booking.customer && (
+      <ChatComponent
+        bookingId={booking._id}
+        recipientId={booking.customer._id}
+        recipientName={booking.customer.name}
+        isOpen={showChat}
+        onClose={() => setShowChat(false)}
+        isProvider={true}
+      />
+    )}
+    </div>
+  );
+};
+
+export default ProviderTrackingNew;

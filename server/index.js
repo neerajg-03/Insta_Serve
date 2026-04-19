@@ -147,7 +147,6 @@ app.use((err, req, res, next) => {
     error: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error' 
   });
 });
-const path = require("path");
 
 // Serve React build
 app.use(express.static(path.join(__dirname, "../client/build")));

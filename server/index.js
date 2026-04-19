@@ -54,9 +54,28 @@ app.use(cors({
 }));
 
 // Security middleware - Configure helmet to allow CORS
-app.use(helmet({
-  crossOriginResourcePolicy: { policy: "cross-origin" }
-}));
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          "https://checkout.razorpay.com"
+        ],
+        connectSrc: [
+          "'self'",
+          "https://insta-serve.onrender.com",
+          "https://checkout.razorpay.com"
+        ],
+        imgSrc: ["'self'", "data:", "https:"],
+        styleSrc: ["'self'", "'unsafe-inline'", "https:"],
+      },
+    },
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
 
 // Rate limiting
 app.set('trust proxy', 1);

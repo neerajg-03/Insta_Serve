@@ -147,11 +147,16 @@ app.use((err, req, res, next) => {
     error: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error' 
   });
 });
+const path = require("path");
 
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({ message: 'Route not found' });
+// Serve React build
+app.use(express.static(path.join(__dirname, "../client/build")));
+
+// Handle React routes
+app.get("*", (req, res) => {
+  res.sendFile(path.join(__dirname, "../client/build/index.html"));
 });
+
 
 // Socket.IO connection handler
 io.on('connection', (socket) => {
